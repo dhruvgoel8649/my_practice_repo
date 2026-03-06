@@ -77,7 +77,7 @@ resource "aws_instance" "app_server" {
   instance_type        = "t3.micro"
   security_groups      = [aws_security_group.app_sg.name]
   iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
-  key_name             = "docker-sample"
+  key_name             = "learning"
   user_data = <<-EOF
     #!/bin/bash
     yum update -y
