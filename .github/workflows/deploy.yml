@@ -1,0 +1,79 @@
+name: CI/CD Pipeline
+on:
+  push:
+    branches: [main]
+env:
+  AWS_REGION: us-east-1
+  ECR_BACKEND_REPO: devops-backend
+  ECR_FRONTEND_REPO: devops-frontend
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Create ECR repos
+        run: |
+          aws ecr describe-repositories --repository-names $ECR_BACKEND_REPO || aws ecr create-repository --repository-name $ECR_BACKEND_REPO
+          aws ecr describe-repositories --repository-names $ECR_FRONTEND_REPO || aws ecr create-repository --repository-name $ECR_FRONTEND_REPO
+      
+      - name: Build and push images
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker build -t $REGISTRY/$ECR_BACKEND_REPO:$TAG -t $REGISTRY/$ECR_BACKEND_REPO:latest ./backend
+          docker push $REGISTRY/$ECR_BACKEND_REPO:$TAG
+          docker push $REGISTRY/$ECR_BACKEND_REPO:latest
+          docker build -t $REGISTRY/$ECR_FRONTEND_REPO:$TAG -t $REGISTRY/$ECR_FRONTEND_REPO:latest ./frontend
+          docker push $REGISTRY/$ECR_FRONTEND_REPO:$TAG
+          docker push $REGISTRY/$ECR_FRONTEND_REPO:latest
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      
+      - name: Terraform Init
+        working-directory: ./terraform
+        run: terraform init
+      
+      - name: Terraform Apply
+        working-directory: ./terraform
+        run: terraform apply -auto-approve
+      
+      - name: Get EC2 IP
+        id: ec2-ip
+        working-directory: ./terraform
+        run: echo "ip=$(terraform output -raw instance_ip)" >> $GITHUB_OUTPUT
+      
+      - name: Wait for EC2
+        run: sleep 90
+      
+      - name: SSH into EC2 and deploy app
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ steps.ec2-ip.outputs.ip }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 60s
+          script: |
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.ecr-login.outputs.registry }}
+            docker pull ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_BACKEND_REPO }}:latest
+            docker pull ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_FRONTEND_REPO }}:latest
+            docker stop backend frontend || true
+            docker rm backend frontend || true
+            docker run -d --name backend -p 8000:8000 -e DEBUG=False -e ALLOWED_HOSTS=* ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_BACKEND_REPO }}:latest
+            docker run -d --name frontend -p 80:80 --link backend:backend ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_FRONTEND_REPO }}:latest
+      
+      - name: Output URL
+        run: echo "Application deployed at http://${{ steps.ec2-ip.outputs.ip }}"

@@ -1,0 +1,1 @@
+# No variables needed - everything hardcoded for simplicity
